@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cesium 最小化示例 - 下雪效果</title>
+    <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css">
+    <style>
+        html, body, #cesiumContainer {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+        #threeCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+        }
+    </style>
+</head>
+<body>
+    <div id="cesiumContainer"></div>
+    <canvas id="threeCanvas"></canvas>
+    
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+                "simplex-noise": "https://cdn.jsdelivr.net/npm/simplex-noise@4.0.1/dist/esm/simplex-noise.js"
+            }
+        }
+    </script>
+    
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Cesium.js"></script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+        import { createNoise3D } from 'simplex-noise';
+
+        // --- Cesium 初始化 --- 
+        const viewer = new Cesium.Viewer('cesiumContainer', {
+            baseLayerPicker: false, // 禁用默认图层选择器以避免 Bing 依赖
+            geocoder: false,
+            homeButton: true,
+            infoBox: false,
+            navigationHelpButton: true,
+            sceneModePicker: false,
+            timeline: false,
+            animation: false,
+            fullscreenButton: true,
+            shouldAnimate: true
+        });
+
+        // 绑定到全局便于调试，并显式设置免授权底图
+        window.viewer = viewer;
+        viewer.imageryLayers.removeAll();
+        viewer.imageryLayers.addImageryProvider(new Cesium.OpenStreetMapImageryProvider({
+            url: 'https://a.tile.openstreetmap.org/'
+        }));
+
+        // 简单视角：纽约上空
+        const position = Cesium.Cartesian3.fromDegrees(-74.0060, 40.7128, 5000);
+        viewer.camera.setView({
+            destination: position,
+            orientation: {
+                heading: Cesium.Math.toRadians(0),
+                pitch: Cesium.Math.toRadians(-45),
+                roll: 0
+            }
+        });
+
+        // --- Global Variables --- 
+        let threeCamera, scene, renderer;
+        let particles, geometry, material;
+        let noise3D;
+        let noiseSeed = Math.random() * 10000;
+        
+        // State & Parameters
+        const params = {
+            // Particles
+            count: 15000,
+            size: 5,
+            opacity: 0.8,
+            color: 0xffffff,
+            
+            // Wind (Perlin Noise)
+            windSpeed: 1.0,
+            windForce: 0.5,
+            turbulence: 0.002,
+            timeScale: 0.3,
+            baseX: 0.2,
+            baseY: -1.5,
+            
+            // Camera HPR (Heading, Pitch, Roll)
+            enableMouseControl: false,
+            heading: 0,      // Yaw/heading in degrees
+            pitch: 0,        // Pitch in degrees
+            roll: 0,         // Roll in degrees
+            camX: 0,
+            camY: 100,
+            camZ: 200,
+            
+            // Camera & Lens
+            fov: 75,
+            
+            // Noise
+            noiseOctaves: 3,
+            noiseSeed: noiseSeed,
+            regenerateNoise: () => regenerateNoise(),
+            previewNoise: false
+        };
+
+        let particleData = [];
+        const areaSize = 2000;
+        let clock = new THREE.Clock();
+
+        // --- Three.js 初始化 --- 
+        initThreeJS();
+        animate();
+
+        function initThreeJS() {
+            noise3D = createNoise3D(() => params.noiseSeed);
+
+            // 1. Scene
+            scene = new THREE.Scene();
+            scene.background = null;
+            
+            // 2. Camera
+            threeCamera = new THREE.PerspectiveCamera(
+                params.fov, 
+                window.innerWidth / window.innerHeight, 
+                1, 
+                3000
+            );
+            
+            // 3. Renderer
+            renderer = new THREE.WebGLRenderer({
+                canvas: document.getElementById('threeCanvas'),
+                antialias: false,
+                powerPreference: "high-performance",
+                alpha: true
+            });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.autoClear = false;
+            
+            // 4. Particles
+            initParticles();
+
+            // 5. GUI
+            initGUI();
+
+            // 6. Events
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function regenerateNoise() {
+            params.noiseSeed = Math.random() * 10000;
+            noise3D = createNoise3D(() => params.noiseSeed);
+            alert('噪声已重新生成！Noise regenerated!');
+        }
+
+        function initParticles() {
+            if (particles) {
+                scene.remove(particles);
+                geometry.dispose();
+            }
+
+            geometry = new THREE.BufferGeometry();
+            const vertices = [];
+            particleData = [];
+
+            const texture = getSprite();
+
+            for (let i = 0; i < params.count; i++) {
+                const x = Math.random() * areaSize - areaSize / 2;
+                const y = Math.random() * areaSize - areaSize / 2;
+                const z = Math.random() * areaSize - areaSize / 2;
+                vertices.push(x, y, z);
+
+                particleData.push({
+                    velocity: new THREE.Vector3(0, 0, 0),
+                    randomness: Math.random()
+                });
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+
+            material = new THREE.PointsMaterial({
+                color: params.color,
+                size: params.size,
+                map: texture,
+                transparent: true,
+                opacity: params.opacity,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+
+        function getSprite() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const context = canvas.getContext('2d');
+            
+            const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(230,240,255,0.8)');
+            gradient.addColorStop(0.4, 'rgba(180,200,230,0.4)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 64, 64);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function initGUI() {
+            const gui = new GUI({ title: '控制面板 Settings', width: 320 });
+
+            // Camera Control
+            const camFolder = gui.addFolder('📷 相机控制 (Camera HPR)');
+            camFolder.add(params, 'enableMouseControl').name('启用鼠标控制').onChange(updateCameraTransform);
+            camFolder.add(params, 'heading', -180, 180).name('航向角 Heading (Y)').onChange(updateCameraTransform);
+            camFolder.add(params, 'pitch', -89, 89).name('俯仰角 Pitch (X)').onChange(updateCameraTransform);
+            camFolder.add(params, 'roll', -180, 180).name('翻滚角 Roll (Z)').onChange(updateCameraTransform);
+            camFolder.add(params, 'camX', -500, 500).name('位置 X').onChange(updateCameraTransform);
+            camFolder.add(params, 'camY', -500, 500).name('位置 Y').onChange(updateCameraTransform);
+            camFolder.add(params, 'camZ', -500, 500).name('位置 Z').onChange(updateCameraTransform);
+            camFolder.add(params, 'fov', 30, 120).name('视野 FOV').onChange(() => {
+                threeCamera.fov = params.fov;
+                threeCamera.updateProjectionMatrix();
+            });
+
+            // Environment & Wind
+            const envFolder = gui.addFolder('🌬️ 环境与风场 (Environment)');
+            envFolder.add(params, 'windSpeed', 0, 3).name('整体风速');
+            envFolder.add(params, 'baseY', -5, -0.1).name('下落速度');
+            envFolder.add(params, 'baseX', -2, 2).name('侧向风力');
+            envFolder.add(params, 'windForce', 0, 2).name('噪声强度');
+            envFolder.add(params, 'turbulence', 0.0001, 0.01).name('噪声密度');
+            envFolder.add(params, 'timeScale', 0.0, 2.0).name('风场变化率');
+
+            // Noise Control
+            const noiseFolder = gui.addFolder('🎲 噪声控制 (Noise)');
+            noiseFolder.add(params, 'noiseOctaves', 1, 6, 1).name('噪声细节层次');
+            noiseFolder.add(params, 'regenerateNoise').name('🔄 重新生成噪声');
+            noiseFolder.add(params, 'previewNoise').name('预览噪声场').onChange(toggleNoisePreview);
+
+            // Particles
+            const partFolder = gui.addFolder('❄️ 雪花状态 (Snow)');
+            partFolder.add(params, 'count', 1000, 50000, 100).name('数量').onFinishChange(initParticles);
+            partFolder.add(params, 'size', 1, 20).name('大小').onChange(v => material.size = v);
+            partFolder.add(params, 'opacity', 0, 1).name('透明度').onChange(v => material.opacity = v);
+            partFolder.addColor(params, 'color').name('颜色').onChange(v => material.color.setHex(v));
+
+            camFolder.open();
+        }
+
+        function toggleNoisePreview(show) {
+            // 简化版本，不显示噪声预览
+        }
+
+        function updateCameraTransform() {
+            threeCamera.position.set(params.camX, params.camY, params.camZ);
+            
+            // Convert HPR to rotation
+            const heading = THREE.MathUtils.degToRad(params.heading);
+            const pitch = THREE.MathUtils.degToRad(params.pitch);
+            const roll = THREE.MathUtils.degToRad(params.roll);
+            
+            threeCamera.rotation.order = 'YXZ';
+            threeCamera.rotation.y = heading;
+            threeCamera.rotation.x = pitch;
+            threeCamera.rotation.z = roll;
+        }
+
+        function onWindowResize() {
+            threeCamera.aspect = window.innerWidth / window.innerHeight;
+            threeCamera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            render();
+        }
+
+        function render() {
+            const delta = clock.getDelta();
+            const elapsedTime = clock.getElapsedTime();
+            
+            // 同步 Cesium 相机到 Three.js 相机
+            syncCesiumToThreeCamera();
+
+            // Snow Particles Physics
+            const positions = particles.geometry.attributes.position.array;
+            const timeOffset = elapsedTime * params.timeScale;
+            const turb = params.turbulence;
+            const force = params.windForce;
+            const globalSpeed = params.windSpeed;
+            const baseX = params.baseX;
+            const baseY = params.baseY;
+
+            for (let i = 0; i < params.count; i++) {
+                const ix = i * 3;
+                const iy = i * 3 + 1;
+                const iz = i * 3 + 2;
+
+                let px = positions[ix];
+                let py = positions[iy];
+                let pz = positions[iz];
+
+                // Multi-octave 3D noise
+                let noiseX = 0, noiseY = 0, noiseZ = 0;
+                let amplitude = 1;
+                let frequency = 1;
+                
+                for (let oct = 0; oct < params.noiseOctaves; oct++) {
+                    noiseX += noise3D(px * turb * frequency, py * turb * frequency, timeOffset + oct * 100) * amplitude;
+                    noiseY += noise3D(px * turb * frequency + 100, py * turb * frequency, timeOffset + oct * 100) * amplitude;
+                    noiseZ += noise3D(px * turb * frequency + 200, py * turb * frequency, timeOffset + oct * 100) * amplitude;
+                    amplitude *= 0.5;
+                    frequency *= 2;
+                }
+
+                const vx = (baseX + noiseX * force) * globalSpeed;
+                const vy = (baseY + noiseY * force * 0.5) * globalSpeed;
+                const vz = (noiseZ * force) * globalSpeed;
+
+                positions[ix] += vx;
+                positions[iy] += vy;
+                positions[iz] += vz;
+
+                // Boundary check
+                const boundary = areaSize / 2;
+                
+                if (positions[iy] < -boundary) {
+                    positions[iy] = boundary;
+                    positions[ix] = (Math.random() - 0.5) * areaSize;
+                    positions[iz] = (Math.random() - 0.5) * areaSize;
+                }
+                if (positions[ix] > boundary) positions[ix] = -boundary;
+                if (positions[ix] < -boundary) positions[ix] = boundary;
+                if (positions[iz] > boundary) positions[iz] = -boundary;
+                if (positions[iz] < -boundary) positions[iz] = boundary;
+            }
+
+            particles.geometry.attributes.position.needsUpdate = true;
+
+            // Direct render without post-processing
+            renderer.render(scene, threeCamera);
+        }
+
+        // 同步 Cesium 相机到 Three.js 相机
+        function syncCesiumToThreeCamera() {
+            // 获取 Cesium 相机的位置和方向
+            const cesiumCamera = viewer.camera;
+            
+            // 获取 Cesium 相机的 HPR
+            // Cesium: heading绕Z轴，pitch绕X轴，roll绕Y轴
+            const heading = Cesium.Math.toDegrees(cesiumCamera.heading);
+            const pitch = Cesium.Math.toDegrees(cesiumCamera.pitch);
+            const roll = Cesium.Math.toDegrees(cesiumCamera.roll);
+            
+            // 设置 Three.js 相机位置在粒子系统中心
+            threeCamera.position.set(0, 0, 0);
+            
+            // 调整 Three.js 相机旋转以匹配 Cesium 视角
+            // 关键修正：反转heading方向，确保雪花移动方向与Cesium相机一致
+            threeCamera.rotation.order = 'YXZ';
+            
+            // 修正：反转heading方向，使雪花移动与地球旋转方向一致
+            threeCamera.rotation.y = -Cesium.Math.toRadians(heading);
+            threeCamera.rotation.x = Cesium.Math.toRadians(pitch);
+            threeCamera.rotation.z = -Cesium.Math.toRadians(roll);
+            
+            // 更新 GUI 参数
+            params.heading = heading;
+            params.pitch = pitch;
+            params.roll = roll;
+        }
+    </script>
+</body>
+</html>

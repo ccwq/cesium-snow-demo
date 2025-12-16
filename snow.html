@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Cinematic Snow - Enhanced</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050510;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.85);
+            pointer-events: none;
+            z-index: 10;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        }
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 200;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+        }
+        p {
+            margin: 5px 0 0 0;
+            font-size: 0.85rem;
+            color: rgba(255, 255, 255, 0.6);
+        }
+        #bgInput {
+            display: none;
+        }
+        #noisePreview {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 200px;
+            height: 200px;
+            border: 2px solid rgba(255,255,255,0.3);
+            display: none;
+            z-index: 100;
+        }
+        #shareNotification {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            color: white;
+            padding: 20px 40px;
+            border-radius: 10px;
+            display: none;
+            z-index: 1000;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <h1>Winter Aether Enhanced</h1>
+        <p>3D Perlin Noise | Volumetric Fog | Camera HPR Control | Share Config</p>
+    </div>
+    
+    <input type="file" id="bgInput" accept="image/*">
+    <canvas id="noisePreview"></canvas>
+    <div id="shareNotification"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+                "simplex-noise": "https://cdn.jsdelivr.net/npm/simplex-noise@4.0.1/dist/esm/simplex-noise.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+        import { createNoise3D } from 'simplex-noise';
+
+        // --- Global Variables ---
+        let camera, scene, renderer;
+        let particles, geometry, material;
+        let volumetricFog; // New: volumetric fog particles
+        let composer, bokehPass;
+        let noise3D;
+        let noiseSeed = Math.random() * 10000;
+        
+        // State & Parameters
+        const params = {
+            // Particles
+            count: 15000,
+            size: 5,
+            opacity: 0.8,
+            color: 0xffffff,
+            
+            // Wind (Perlin Noise)
+            windSpeed: 1.0,
+            windForce: 0.5,
+            turbulence: 0.002,
+            timeScale: 0.3,
+            baseX: 0.2,
+            baseY: -1.5,
+            
+            // Camera HPR (Heading, Pitch, Roll)
+            enableMouseControl: true,
+            heading: 0,      // Yaw/heading in degrees
+            pitch: 0,        // Pitch in degrees
+            roll: 0,         // Roll in degrees
+            camX: 0,
+            camY: 100,
+            camZ: 200,
+            
+            // Camera & Lens
+            focus: 80.0,
+            aperture: 5.0,
+            maxblur: 0.00,
+            fov: 75,
+            
+            // Volumetric Fog
+            enableVolFog: true,
+            volFogDensity: 0.3,
+            volFogColor: 0x88aacc,
+            volFogSpeed: 0.1,
+            
+            // Environment
+            bgBrightness: 1.0,
+            bgImageUrl: '',
+            
+            // Noise
+            noiseOctaves: 3,
+            noiseSeed: noiseSeed,
+            regenerateNoise: () => regenerateNoise(),
+            previewNoise: false,
+            
+            // Actions
+            uploadBg: () => document.getElementById('bgInput').click(),
+            saveConfig: () => saveConfiguration(),
+            loadConfig: () => loadConfiguration(),
+            shareConfig: () => shareConfiguration(),
+            copyShareUrl: () => copyShareUrl(),
+        };
+
+        let particleData = [];
+        const areaSize = 2000;
+        let mouseX = 0;
+        let mouseY = 0;
+        let windowHalfX = window.innerWidth / 2;
+        let windowHalfY = window.innerHeight / 2;
+        let clock = new THREE.Clock();
+        let bgTexture = null;
+        let shareUrl = '';
+
+        init();
+        animate();
+
+        function init() {
+            noise3D = createNoise3D(() => params.noiseSeed);
+
+            // Check for shared config in URL
+            loadFromUrl();
+
+            // 1. Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050510);
+            scene.fog = new THREE.FogExp2(0x050510, 0.0015);
+
+            // 2. Camera
+            camera = new THREE.PerspectiveCamera(params.fov, window.innerWidth / window.innerHeight, 1, 3000);
+            updateCameraTransform();
+
+            // 3. Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.autoClear = false;
+            document.body.appendChild(renderer.domElement);
+
+            // 4. Particles
+            initParticles();
+
+            // 5. Volumetric Fog
+            initVolumetricFog();
+
+            // 6. Post Processing
+            initPostProcessing();
+
+            // 7. GUI
+            initGUI();
+
+            // 8. Events
+            document.body.style.touchAction = 'none';
+            document.body.addEventListener('pointermove', onPointerMove);
+            window.addEventListener('resize', onWindowResize);
+            
+            // Background Upload Handler
+            const fileInput = document.getElementById('bgInput');
+            fileInput.addEventListener('change', handleBgUpload);
+
+            // Load background URL if specified
+            if (params.bgImageUrl) {
+                loadBackgroundFromUrl(params.bgImageUrl);
+            }
+        }
+
+        function regenerateNoise() {
+            params.noiseSeed = Math.random() * 10000;
+            noise3D = createNoise3D(() => params.noiseSeed);
+            alert('噪声已重新生成！Noise regenerated!');
+        }
+
+        function updateCameraTransform() {
+            camera.position.set(params.camX, params.camY, params.camZ);
+            
+            // Convert HPR to rotation
+            const heading = THREE.MathUtils.degToRad(params.heading);
+            const pitch = THREE.MathUtils.degToRad(params.pitch);
+            const roll = THREE.MathUtils.degToRad(params.roll);
+            
+            camera.rotation.order = 'YXZ';
+            camera.rotation.y = heading;
+            camera.rotation.x = pitch;
+            camera.rotation.z = roll;
+        }
+
+        function initParticles() {
+            if (particles) {
+                scene.remove(particles);
+                geometry.dispose();
+            }
+
+            geometry = new THREE.BufferGeometry();
+            const vertices = [];
+            particleData = [];
+
+            const texture = getSprite();
+
+            for (let i = 0; i < params.count; i++) {
+                const x = Math.random() * areaSize - areaSize / 2;
+                const y = Math.random() * areaSize - areaSize / 2;
+                const z = Math.random() * areaSize - areaSize / 2;
+                vertices.push(x, y, z);
+
+                particleData.push({
+                    velocity: new THREE.Vector3(0, 0, 0),
+                    randomness: Math.random()
+                });
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+
+            material = new THREE.PointsMaterial({
+                color: params.color,
+                size: params.size,
+                map: texture,
+                transparent: true,
+                opacity: params.opacity,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+
+        function initVolumetricFog() {
+            if (volumetricFog) {
+                scene.remove(volumetricFog);
+            }
+
+            if (!params.enableVolFog) return;
+
+            const fogGeometry = new THREE.BufferGeometry();
+            const fogVertices = [];
+            const fogCount = 3000;
+
+            for (let i = 0; i < fogCount; i++) {
+                const x = Math.random() * areaSize * 1.5 - areaSize * 0.75;
+                const y = Math.random() * areaSize * 0.5 - areaSize * 0.25;
+                const z = Math.random() * areaSize * 1.5 - areaSize * 0.75;
+                fogVertices.push(x, y, z);
+            }
+
+            fogGeometry.setAttribute('position', new THREE.Float32BufferAttribute(fogVertices, 3));
+
+            const fogTexture = getFogSprite();
+            const fogMaterial = new THREE.PointsMaterial({
+                color: params.volFogColor,
+                size: 80,
+                map: fogTexture,
+                transparent: true,
+                opacity: params.volFogDensity,
+                blending: THREE.NormalBlending,
+                depthWrite: false,
+            });
+
+            volumetricFog = new THREE.Points(fogGeometry, fogMaterial);
+            scene.add(volumetricFog);
+        }
+
+        function getFogSprite() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128;
+            canvas.height = 128;
+            const context = canvas.getContext('2d');
+            
+            const gradient = context.createRadialGradient(64, 64, 0, 64, 64, 64);
+            gradient.addColorStop(0, 'rgba(255,255,255,0.3)');
+            gradient.addColorStop(0.5, 'rgba(200,220,240,0.15)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 128, 128);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function getSprite() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const context = canvas.getContext('2d');
+            
+            const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(230,240,255,0.8)');
+            gradient.addColorStop(0.4, 'rgba(180,200,230,0.4)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 64, 64);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function initPostProcessing() {
+            const renderPass = new RenderPass(scene, camera);
+
+            bokehPass = new BokehPass(scene, camera, {
+                focus: params.focus,
+                aperture: params.aperture * 0.00001,
+                maxblur: params.maxblur
+            });
+
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderPass);
+            composer.addPass(bokehPass);
+        }
+
+        function initGUI() {
+            const gui = new GUI({ title: '控制面板 Settings', width: 320 });
+
+            // Camera Control
+            const camFolder = gui.addFolder('📷 相机控制 (Camera HPR)');
+            camFolder.add(params, 'enableMouseControl').name('启用鼠标控制').onChange(updateCameraTransform);
+            camFolder.add(params, 'heading', -180, 180).name('航向角 Heading (Y)').onChange(updateCameraTransform);
+            camFolder.add(params, 'pitch', -89, 89).name('俯仰角 Pitch (X)').onChange(updateCameraTransform);
+            camFolder.add(params, 'roll', -180, 180).name('翻滚角 Roll (Z)').onChange(updateCameraTransform);
+            camFolder.add(params, 'camX', -500, 500).name('位置 X').onChange(updateCameraTransform);
+            camFolder.add(params, 'camY', -500, 500).name('位置 Y').onChange(updateCameraTransform);
+            camFolder.add(params, 'camZ', -500, 500).name('位置 Z').onChange(updateCameraTransform);
+            camFolder.add(params, 'fov', 30, 120).name('视野 FOV').onChange(() => {
+                camera.fov = params.fov;
+                camera.updateProjectionMatrix();
+            });
+
+            // Lens Settings
+            const lensFolder = gui.addFolder('🎥 镜头效果 (Lens)');
+            lensFolder.add(params, 'focus', 10.0, 1000.0).name('对焦距离').onChange(updateBokeh);
+            lensFolder.add(params, 'aperture', 0, 20).name('光圈大小').onChange(updateBokeh);
+            lensFolder.add(params, 'maxblur', 0.0, 0.05).name('背景虚化').onChange(updateBokeh);
+
+            // Environment & Wind
+            const envFolder = gui.addFolder('🌬️ 环境与风场 (Environment)');
+            envFolder.add(params, 'windSpeed', 0, 3).name('整体风速');
+            envFolder.add(params, 'baseY', -5, -0.1).name('下落速度');
+            envFolder.add(params, 'baseX', -2, 2).name('侧向风力');
+            envFolder.add(params, 'windForce', 0, 2).name('噪声强度');
+            envFolder.add(params, 'turbulence', 0.0001, 0.01).name('噪声密度');
+            envFolder.add(params, 'timeScale', 0.0, 2.0).name('风场变化率');
+
+            // Noise Control
+            const noiseFolder = gui.addFolder('🎲 噪声控制 (Noise)');
+            noiseFolder.add(params, 'noiseOctaves', 1, 6, 1).name('噪声细节层次');
+            noiseFolder.add(params, 'regenerateNoise').name('🔄 重新生成噪声');
+            noiseFolder.add(params, 'previewNoise').name('预览噪声场').onChange(toggleNoisePreview);
+
+            // Particles
+            const partFolder = gui.addFolder('❄️ 雪花状态 (Snow)');
+            partFolder.add(params, 'count', 1000, 50000, 100).name('数量').onFinishChange(initParticles);
+            partFolder.add(params, 'size', 1, 20).name('大小').onChange(v => material.size = v);
+            partFolder.add(params, 'opacity', 0, 1).name('透明度').onChange(v => material.opacity = v);
+            partFolder.addColor(params, 'color').name('颜色').onChange(v => material.color.setHex(v));
+
+            // Volumetric Fog
+            const fogFolder = gui.addFolder('🌫️ 体积雾 (Volumetric Fog)');
+            fogFolder.add(params, 'enableVolFog').name('启用体积雾').onChange(initVolumetricFog);
+            fogFolder.add(params, 'volFogDensity', 0, 1).name('雾密度').onChange(v => {
+                if (volumetricFog) volumetricFog.material.opacity = v;
+            });
+            fogFolder.addColor(params, 'volFogColor').name('雾颜色').onChange(v => {
+                if (volumetricFog) volumetricFog.material.color.setHex(v);
+            });
+            fogFolder.add(params, 'volFogSpeed', 0, 1).name('雾移动速度');
+
+            // Background
+            const bgFolder = gui.addFolder('🖼️ 背景设置 (Background)');
+            bgFolder.add(params, 'uploadBg').name('📷 上传背景图');
+            bgFolder.add(params, 'bgImageUrl').name('背景图片URL').onFinishChange(v => {
+                if (v) loadBackgroundFromUrl(v);
+            });
+            bgFolder.add(params, 'bgBrightness', 0, 2).name('背景亮度').onChange(updateBgColor);
+
+            // System & Share
+            const sysFolder = gui.addFolder('💾 系统与分享 (System)');
+            sysFolder.add(params, 'saveConfig').name('💾 保存配置');
+            sysFolder.add(params, 'loadConfig').name('📂 加载配置');
+            sysFolder.add(params, 'shareConfig').name('🔗 生成分享链接');
+            sysFolder.add(params, 'copyShareUrl').name('📋 复制分享链接');
+
+            camFolder.open();
+        }
+
+        function toggleNoisePreview(show) {
+            const canvas = document.getElementById('noisePreview');
+            canvas.style.display = show ? 'block' : 'none';
+            
+            if (show) {
+                renderNoisePreview(canvas);
+            }
+        }
+
+        function renderNoisePreview(canvas) {
+            const ctx = canvas.getContext('2d');
+            const width = 200;
+            const height = 200;
+            canvas.width = width;
+            canvas.height = height;
+            
+            const imageData = ctx.createImageData(width, height);
+            const slice = 0; // Z slice
+            
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const nx = (x / width - 0.5) * 10;
+                    const ny = (y / height - 0.5) * 10;
+                    
+                    let value = 0;
+                    let amplitude = 1;
+                    let frequency = 1;
+                    
+                    // Multi-octave noise
+                    for (let i = 0; i < params.noiseOctaves; i++) {
+                        value += noise3D(nx * frequency * params.turbulence * 100, 
+                                        ny * frequency * params.turbulence * 100, 
+                                        slice) * amplitude;
+                        amplitude *= 0.5;
+                        frequency *= 2;
+                    }
+                    
+                    // Normalize to 0-255
+                    const gray = Math.floor(((value + 1) / 2) * 255);
+                    const idx = (y * width + x) * 4;
+                    imageData.data[idx] = gray;
+                    imageData.data[idx + 1] = gray;
+                    imageData.data[idx + 2] = gray;
+                    imageData.data[idx + 3] = 255;
+                }
+            }
+            
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+        function updateBokeh() {
+            bokehPass.uniforms['focus'].value = params.focus;
+            bokehPass.uniforms['aperture'].value = params.aperture * 0.00001;
+            bokehPass.uniforms['maxblur'].value = params.maxblur;
+        }
+
+        function updateBgColor() {
+            const val = params.bgBrightness;
+            const col = new THREE.Color(0x050510).multiplyScalar(val);
+            if (!scene.background || scene.background.isColor) {
+                scene.background = col;
+                scene.fog.color = col;
+            } else {
+                scene.fog.color = col;
+            }
+        }
+
+        function loadBackgroundFromUrl(url) {
+            if (!url) return;
+            
+            const loader = new THREE.TextureLoader();
+            loader.load(url, (texture) => {
+                bgTexture = texture;
+                texture.colorSpace = THREE.SRGBColorSpace;
+                scene.background = texture;
+                scene.environment = texture;
+            }, undefined, (error) => {
+                console.error('加载背景图片失败:', error);
+                alert('加载背景图片失败，请检查URL');
+            });
+        }
+
+        function handleBgUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const loader = new THREE.TextureLoader();
+                loader.load(e.target.result, (texture) => {
+                    bgTexture = texture;
+                    texture.colorSpace = THREE.SRGBColorSpace;
+                    scene.background = texture;
+                    scene.environment = texture;
+                });
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function getShareableConfig() {
+            const config = {...params};
+            // Remove functions
+            delete config.uploadBg;
+            delete config.saveConfig;
+            delete config.loadConfig;
+            delete config.shareConfig;
+            delete config.copyShareUrl;
+            delete config.regenerateNoise;
+            return config;
+        }
+
+        function saveConfiguration() {
+            const config = JSON.stringify(getShareableConfig());
+            localStorage.setItem('snow_scene_config', config);
+            showNotification('配置已保存！Configuration saved!');
+        }
+
+        function loadConfiguration() {
+            const config = localStorage.getItem('snow_scene_config');
+            if (config) {
+                applyConfiguration(JSON.parse(config));
+                showNotification('配置已加载！Configuration loaded!');
+            } else {
+                showNotification('未找到保存的配置 No saved config found');
+            }
+        }
+
+        function applyConfiguration(savedParams) {
+            Object.assign(params, savedParams);
+            
+            initParticles();
+            initVolumetricFog();
+            updateBokeh();
+            updateCameraTransform();
+            camera.fov = params.fov;
+            camera.updateProjectionMatrix();
+            
+            if (params.bgImageUrl) {
+                loadBackgroundFromUrl(params.bgImageUrl);
+            }
+        }
+
+        function shareConfiguration() {
+            const config = getShareableConfig();
+            const jsonStr = JSON.stringify(config);
+            const base64 = btoa(encodeURIComponent(jsonStr));
+            
+            const baseUrl = window.location.origin + window.location.pathname;
+            shareUrl = `${baseUrl}#config=${base64}`;
+            
+            showNotification(`分享链接已生成！<br>Share URL generated!<br><small>${shareUrl.substring(0, 60)}...</small>`);
+        }
+
+        function copyShareUrl() {
+            if (!shareUrl) {
+                shareConfiguration();
+            }
+            
+            navigator.clipboard.writeText(shareUrl).then(() => {
+                showNotification('链接已复制到剪贴板！<br>URL copied to clipboard!');
+            }).catch(() => {
+                showNotification('复制失败，请手动复制 Copy failed');
+            });
+        }
+
+        function loadFromUrl() {
+            const hash = window.location.hash;
+            if (hash.startsWith('#config=')) {
+                try {
+                    const base64 = hash.substring(8);
+                    const jsonStr = decodeURIComponent(atob(base64));
+                    const config = JSON.parse(jsonStr);
+                    applyConfiguration(config);
+                    showNotification('已从URL加载配置！<br>Config loaded from URL!');
+                } catch (e) {
+                    console.error('加载分享配置失败:', e);
+                }
+            }
+        }
+
+        function showNotification(message) {
+            const notification = document.getElementById('shareNotification');
+            notification.innerHTML = message;
+            notification.style.display = 'block';
+            setTimeout(() => {
+                notification.style.display = 'none';
+            }, 3000);
+        }
+
+        function onPointerMove(event) {
+            if (event.isPrimary === false) return;
+            mouseX = event.clientX - windowHalfX;
+            mouseY = event.clientY - windowHalfY;
+        }
+
+        function onWindowResize() {
+            windowHalfX = window.innerWidth / 2;
+            windowHalfY = window.innerHeight / 2;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            render();
+        }
+
+        function render() {
+            const delta = clock.getDelta();
+            const elapsedTime = clock.getElapsedTime();
+            
+            // Camera Control
+            if (params.enableMouseControl) {
+                const targetX = params.camX + (mouseX * 0.2);
+                const targetY = params.camY + (-mouseY * 0.2);
+                camera.position.x += (targetX - camera.position.x) * 0.05;
+                camera.position.y += (targetY - camera.position.y) * 0.05;
+                camera.lookAt(scene.position);
+            } else {
+                updateCameraTransform();
+            }
+
+            // Snow Particles Physics
+            const positions = particles.geometry.attributes.position.array;
+            const timeOffset = elapsedTime * params.timeScale;
+            const turb = params.turbulence;
+            const force = params.windForce;
+            const globalSpeed = params.windSpeed;
+            const baseX = params.baseX;
+            const baseY = params.baseY;
+
+            for (let i = 0; i < params.count; i++) {
+                const ix = i * 3;
+                const iy = i * 3 + 1;
+                const iz = i * 3 + 2;
+
+                let px = positions[ix];
+                let py = positions[iy];
+                let pz = positions[iz];
+
+                // Multi-octave 3D noise
+                let noiseX = 0, noiseY = 0, noiseZ = 0;
+                let amplitude = 1;
+                let frequency = 1;
+                
+                for (let oct = 0; oct < params.noiseOctaves; oct++) {
+                    noiseX += noise3D(px * turb * frequency, py * turb * frequency, timeOffset + oct * 100) * amplitude;
+                    noiseY += noise3D(px * turb * frequency + 100, py * turb * frequency, timeOffset + oct * 100) * amplitude;
+                    noiseZ += noise3D(px * turb * frequency + 200, py * turb * frequency, timeOffset + oct * 100) * amplitude;
+                    amplitude *= 0.5;
+                    frequency *= 2;
+                }
+
+                const vx = (baseX + noiseX * force) * globalSpeed;
+                const vy = (baseY + noiseY * force * 0.5) * globalSpeed;
+                const vz = (noiseZ * force) * globalSpeed;
+
+                positions[ix] += vx;
+                positions[iy] += vy;
+                positions[iz] += vz;
+
+                // Boundary check
+                const boundary = areaSize / 2;
+                
+                if (positions[iy] < -boundary) {
+                    positions[iy] = boundary;
+                    positions[ix] = (Math.random() - 0.5) * areaSize;
+                    positions[iz] = (Math.random() - 0.5) * areaSize;
+                }
+                if (positions[ix] > boundary) positions[ix] = -boundary;
+                if (positions[ix] < -boundary) positions[ix] = boundary;
+                if (positions[iz] > boundary) positions[iz] = -boundary;
+                if (positions[iz] < -boundary) positions[iz] = boundary;
+            }
+
+            particles.geometry.attributes.position.needsUpdate = true;
+
+            // Volumetric Fog Animation
+            if (volumetricFog && params.enableVolFog) {
+                const fogPositions = volumetricFog.geometry.attributes.position.array;
+                const fogSpeed = params.volFogSpeed;
+                
+                for (let i = 0; i < fogPositions.length; i += 3) {
+                    fogPositions[i] += fogSpeed * 0.1;
+                    fogPositions[i + 1] += Math.sin(elapsedTime + i) * 0.05;
+                    
+                    if (fogPositions[i] > areaSize * 0.75) {
+                        fogPositions[i] = -areaSize * 0.75;
+                    }
+                }
+                
+                volumetricFog.geometry.attributes.position.needsUpdate = true;
+                volumetricFog.rotation.y = elapsedTime * 0.01;
+            }
+
+            // Update noise preview if visible
+            if (params.previewNoise) {
+                const canvas = document.getElementById('noisePreview');
+                if (canvas.style.display === 'block') {
+                    renderNoisePreview(canvas);
+                }
+            }
+
+            composer.render(0.1);
+        }
+    </script>
+</body>
+</html>
