@@ -57,6 +57,8 @@
 项目已部署到 GitHub Pages，可直接访问：
 - 主页面：<https://ccwq.github.io/cesium-snow-demo/cesium-hellow.html>
 
+> 如果遇到 404，请先确认 GitHub Actions 部署已成功（仓库的 “Actions” > “Deploy static site to GitHub Pages” 工作流）。
+
 ## 项目结构
 
 ```
@@ -127,17 +129,18 @@ Three.js 相机与 Cesium 相机的同步实现：
 
 ### GitHub Pages 部署
 
-1. 确保项目已推送到 GitHub 仓库
+> 仓库默认分支是 `master`（非 `main`），工作流会自动将 `master` 分支发布到 GitHub Pages。
+
+1. 确保项目已推送到 GitHub 仓库（默认分支：`master`）
 
 2. 在 GitHub 仓库中：
    - 进入 "Settings" 页面
    - 点击 "Pages" 选项
    - 在 "Build and deployment" 部分，选择：
-     - Source: `Deploy from a branch`
-     - Branch: `main`，`/ (root)`
+     - Source: `GitHub Actions`
    - 点击 "Save"
 
-3. 等待几分钟，GitHub Pages 将自动部署
+3. “Actions” 页面会自动触发 **Deploy static site to GitHub Pages** 工作流，完成后 Pages 站点会生成（地址如上）。
 
 4. 访问 `https://<username>.github.io/<repository-name>/cesium-hellow.html` 查看效果
 

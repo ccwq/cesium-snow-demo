@@ -364,31 +364,26 @@
 
         // 同步 Cesium 相机到 Three.js 相机
         function syncCesiumToThreeCamera() {
-            // 获取 Cesium 相机的位置和方向
             const cesiumCamera = viewer.camera;
-            
-            // 获取 Cesium 相机的 HPR
-            // Cesium: heading绕Z轴，pitch绕X轴，roll绕Y轴
-            const heading = Cesium.Math.toDegrees(cesiumCamera.heading);
-            const pitch = Cesium.Math.toDegrees(cesiumCamera.pitch);
-            const roll = Cesium.Math.toDegrees(cesiumCamera.roll);
-            
-            // 设置 Three.js 相机位置在粒子系统中心
+
+            // Cesium 使用 East-North-Up (X=东, Y=北, Z=上)
+            // Three 使用 X=右, Y=上, Z=朝屏幕外（相机看向 -Z）
+            // 因此需要做轴重映射：Three = (x, z, -y) from Cesium
+            const toThree = (v) => new THREE.Vector3(v.x, v.z, -v.y);
+
+            const dir = toThree(cesiumCamera.direction).normalize(); // 前方
+            const up = toThree(cesiumCamera.up).normalize();         // 上方
+            const right = toThree(cesiumCamera.right).normalize();   // 右方
+
+            // 让 Three 相机面向 Cesium 的前方：Three 相机的 -Z 对齐 Cesium 的 direction
+            const zAxis = dir.clone().multiplyScalar(-1);
+
+            const basis = new THREE.Matrix4();
+            basis.makeBasis(right, up, zAxis);
+            threeCamera.setRotationFromMatrix(basis);
+
+            // 粒子层固定在原点，只同步朝向；位置保持 0 避免引入位移差
             threeCamera.position.set(0, 0, 0);
-            
-            // 调整 Three.js 相机旋转以匹配 Cesium 视角
-            // 关键修正：反转heading方向，确保雪花移动方向与Cesium相机一致
-            threeCamera.rotation.order = 'YXZ';
-            
-            // 修正：反转heading方向，使雪花移动与地球旋转方向一致
-            threeCamera.rotation.y = -Cesium.Math.toRadians(heading);
-            threeCamera.rotation.x = Cesium.Math.toRadians(pitch);
-            threeCamera.rotation.z = -Cesium.Math.toRadians(roll);
-            
-            // 更新 GUI 参数
-            params.heading = heading;
-            params.pitch = pitch;
-            params.roll = roll;
         }
     </script>
 </body>
