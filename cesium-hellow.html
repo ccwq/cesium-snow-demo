@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cesium 最小化示例 - 下雪效果</title>
+    <title>Cesium + Three.js 下雪效果 - HPR同步修复版</title>
     <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css">
     <style>
         html, body, #cesiumContainer {
@@ -22,11 +22,24 @@
             pointer-events: none;
             z-index: 1;
         }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            z-index: 2;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
     <div id="cesiumContainer"></div>
     <canvas id="threeCanvas"></canvas>
+    <div id="info"></div>
     
     <script type="importmap">
         {
@@ -46,7 +59,7 @@
 
         // --- Cesium 初始化 --- 
         const viewer = new Cesium.Viewer('cesiumContainer', {
-            baseLayerPicker: false, // 禁用默认图层选择器以避免 Bing 依赖
+            baseLayerPicker: false,
             geocoder: false,
             homeButton: true,
             infoBox: false,
@@ -58,14 +71,12 @@
             shouldAnimate: true
         });
 
-        // 绑定到全局便于调试，并显式设置免授权底图
         window.viewer = viewer;
         viewer.imageryLayers.removeAll();
         viewer.imageryLayers.addImageryProvider(new Cesium.OpenStreetMapImageryProvider({
             url: 'https://a.tile.openstreetmap.org/'
         }));
 
-        // 简单视角：纽约上空
         const position = Cesium.Cartesian3.fromDegrees(-74.0060, 40.7128, 5000);
         viewer.camera.setView({
             destination: position,
@@ -81,16 +92,33 @@
         let particles, geometry, material;
         let noise3D;
         let noiseSeed = Math.random() * 10000;
+        const guiState = { controllers: {}, syncing: false };
+        
+        // 关键修复：统一的坐标转换矩阵
+        const cesiumToThreeMatrix = new THREE.Matrix4();
+        // Cesium: X=东, Y=北, Z=上 -> Three: X=东, Y=上, Z=南
+        cesiumToThreeMatrix.set(
+            1,  0,  0, 0,
+            0,  0,  1, 0,
+            0, -1,  0, 0,
+            0,  0,  0, 1
+        );
+        
+        const lastStableBasis = {
+            east: new THREE.Vector3(1, 0, 0),
+            north: new THREE.Vector3(0, 0, -1),
+            up: new THREE.Vector3(0, 1, 0),
+            down: new THREE.Vector3(0, -1, 0),
+            valid: false
+        };
         
         // State & Parameters
         const params = {
-            // Particles
             count: 15000,
             size: 5,
             opacity: 0.8,
             color: 0xffffff,
             
-            // Wind (Perlin Noise)
             windSpeed: 1.0,
             windForce: 0.5,
             turbulence: 0.002,
@@ -98,23 +126,23 @@
             baseX: 0.2,
             baseY: -1.5,
             
-            // Camera HPR (Heading, Pitch, Roll)
             enableMouseControl: false,
-            heading: 0,      // Yaw/heading in degrees
-            pitch: 0,        // Pitch in degrees
-            roll: 0,         // Roll in degrees
-            camX: 0,
-            camY: 100,
-            camZ: 200,
+            heading: 0,
+            pitch: -45,
+            roll: 0,
+            camX: -74.0060,
+            camY: 40.7128,
+            camZ: 5000,
             
-            // Camera & Lens
             fov: 75,
+            syncFov: false,  // 新增：是否同步Cesium的FOV
             
-            // Noise
             noiseOctaves: 3,
             noiseSeed: noiseSeed,
             regenerateNoise: () => regenerateNoise(),
-            previewNoise: false
+            
+            // 新增：调试信息
+            showDebugInfo: true
         };
 
         let particleData = [];
@@ -128,11 +156,9 @@
         function initThreeJS() {
             noise3D = createNoise3D(() => params.noiseSeed);
 
-            // 1. Scene
             scene = new THREE.Scene();
             scene.background = null;
             
-            // 2. Camera
             threeCamera = new THREE.PerspectiveCamera(
                 params.fov, 
                 window.innerWidth / window.innerHeight, 
@@ -140,7 +166,6 @@
                 3000
             );
             
-            // 3. Renderer
             renderer = new THREE.WebGLRenderer({
                 canvas: document.getElementById('threeCanvas'),
                 antialias: false,
@@ -151,20 +176,16 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.autoClear = false;
             
-            // 4. Particles
             initParticles();
-
-            // 5. GUI
             initGUI();
+            syncParamsFromCesiumCamera();
 
-            // 6. Events
             window.addEventListener('resize', onWindowResize);
         }
 
         function regenerateNoise() {
             params.noiseSeed = Math.random() * 10000;
             noise3D = createNoise3D(() => params.noiseSeed);
-            alert('噪声已重新生成！Noise regenerated!');
         }
 
         function initParticles() {
@@ -225,24 +246,23 @@
         }
 
         function initGUI() {
-            const gui = new GUI({ title: '控制面板 Settings', width: 320 });
+            const gui = new GUI({ title: '控制面板', width: 320 });
 
-            // Camera Control
-            const camFolder = gui.addFolder('📷 相机控制 (Camera HPR)');
-            camFolder.add(params, 'enableMouseControl').name('启用鼠标控制').onChange(updateCameraTransform);
-            camFolder.add(params, 'heading', -180, 180).name('航向角 Heading (Y)').onChange(updateCameraTransform);
-            camFolder.add(params, 'pitch', -89, 89).name('俯仰角 Pitch (X)').onChange(updateCameraTransform);
-            camFolder.add(params, 'roll', -180, 180).name('翻滚角 Roll (Z)').onChange(updateCameraTransform);
-            camFolder.add(params, 'camX', -500, 500).name('位置 X').onChange(updateCameraTransform);
-            camFolder.add(params, 'camY', -500, 500).name('位置 Y').onChange(updateCameraTransform);
-            camFolder.add(params, 'camZ', -500, 500).name('位置 Z').onChange(updateCameraTransform);
-            camFolder.add(params, 'fov', 30, 120).name('视野 FOV').onChange(() => {
+            const camFolder = gui.addFolder('📷 相机控制');
+            guiState.controllers.enableMouseControl = camFolder.add(params, 'enableMouseControl').name('启用鼠标控制');
+            guiState.controllers.heading = camFolder.add(params, 'heading', -180, 180).name('航向角 Heading (°)').onChange(onGuiPoseChanged);
+            guiState.controllers.pitch = camFolder.add(params, 'pitch', -89, 89).name('俯仰角 Pitch (°)').onChange(onGuiPoseChanged);
+            guiState.controllers.roll = camFolder.add(params, 'roll', -180, 180).name('翻滚角 Roll (°)').onChange(onGuiPoseChanged);
+            guiState.controllers.camX = camFolder.add(params, 'camX', -180, 180).name('经度 (°)').onFinishChange(onGuiPoseChanged);
+            guiState.controllers.camY = camFolder.add(params, 'camY', -90, 90).name('纬度 (°)').onFinishChange(onGuiPoseChanged);
+            guiState.controllers.camZ = camFolder.add(params, 'camZ', 0, 500000).name('高度 (m)').onFinishChange(onGuiPoseChanged);
+            guiState.controllers.syncFov = camFolder.add(params, 'syncFov').name('🔗 同步Cesium FOV');
+            guiState.controllers.fov = camFolder.add(params, 'fov', 30, 120).name('视野 FOV (°)').onChange(() => {
                 threeCamera.fov = params.fov;
                 threeCamera.updateProjectionMatrix();
             });
 
-            // Environment & Wind
-            const envFolder = gui.addFolder('🌬️ 环境与风场 (Environment)');
+            const envFolder = gui.addFolder('🌬️ 环境与风场');
             envFolder.add(params, 'windSpeed', 0, 3).name('整体风速');
             envFolder.add(params, 'baseY', -5, -0.1).name('下落速度');
             envFolder.add(params, 'baseX', -2, 2).name('侧向风力');
@@ -250,45 +270,120 @@
             envFolder.add(params, 'turbulence', 0.0001, 0.01).name('噪声密度');
             envFolder.add(params, 'timeScale', 0.0, 2.0).name('风场变化率');
 
-            // Noise Control
-            const noiseFolder = gui.addFolder('🎲 噪声控制 (Noise)');
+            const noiseFolder = gui.addFolder('🎲 噪声控制');
             noiseFolder.add(params, 'noiseOctaves', 1, 6, 1).name('噪声细节层次');
             noiseFolder.add(params, 'regenerateNoise').name('🔄 重新生成噪声');
-            noiseFolder.add(params, 'previewNoise').name('预览噪声场').onChange(toggleNoisePreview);
 
-            // Particles
-            const partFolder = gui.addFolder('❄️ 雪花状态 (Snow)');
+            const partFolder = gui.addFolder('❄️ 雪花设置');
             partFolder.add(params, 'count', 1000, 50000, 100).name('数量').onFinishChange(initParticles);
             partFolder.add(params, 'size', 1, 20).name('大小').onChange(v => material.size = v);
             partFolder.add(params, 'opacity', 0, 1).name('透明度').onChange(v => material.opacity = v);
             partFolder.addColor(params, 'color').name('颜色').onChange(v => material.color.setHex(v));
 
+            const debugFolder = gui.addFolder('🔧 调试');
+            debugFolder.add(params, 'showDebugInfo').name('显示调试信息');
+
             camFolder.open();
         }
 
-        function toggleNoisePreview(show) {
-            // 简化版本，不显示噪声预览
+        function syncParamsFromCesiumCamera() {
+            if (!guiState.controllers.heading) return;
+            const cesiumCamera = viewer.camera;
+            const headingDeg = Cesium.Math.toDegrees(cesiumCamera.heading);
+            const pitchDeg = Cesium.Math.toDegrees(cesiumCamera.pitch);
+            const rollDeg = Cesium.Math.toDegrees(cesiumCamera.roll);
+            const cartesianPos = cesiumCamera.positionWC || cesiumCamera.position;
+            const carto = Cesium.Cartographic.fromCartesian(cartesianPos);
+            const lonDeg = Cesium.Math.toDegrees(carto.longitude);
+            const latDeg = Cesium.Math.toDegrees(carto.latitude);
+            const height = carto.height;
+
+            guiState.syncing = true;
+            params.heading = headingDeg;
+            params.pitch = pitchDeg;
+            params.roll = rollDeg;
+            params.camX = lonDeg;
+            params.camY = latDeg;
+            params.camZ = height;
+            guiState.controllers.heading.setValue(headingDeg);
+            guiState.controllers.pitch.setValue(pitchDeg);
+            guiState.controllers.roll.setValue(rollDeg);
+            guiState.controllers.camX.setValue(lonDeg);
+            guiState.controllers.camY.setValue(latDeg);
+            guiState.controllers.camZ.setValue(height);
+            guiState.syncing = false;
         }
 
-        function updateCameraTransform() {
-            threeCamera.position.set(params.camX, params.camY, params.camZ);
-            
-            // Convert HPR to rotation
-            const heading = THREE.MathUtils.degToRad(params.heading);
-            const pitch = THREE.MathUtils.degToRad(params.pitch);
-            const roll = THREE.MathUtils.degToRad(params.roll);
-            
-            threeCamera.rotation.order = 'YXZ';
-            threeCamera.rotation.y = heading;
-            threeCamera.rotation.x = pitch;
-            threeCamera.rotation.z = roll;
+        function applyGuiPoseToCesium() {
+            const heading = Cesium.Math.toRadians(params.heading);
+            const pitch = Cesium.Math.toRadians(params.pitch);
+            const roll = Cesium.Math.toRadians(params.roll);
+            const destination = Cesium.Cartesian3.fromDegrees(params.camX, params.camY, params.camZ);
+            viewer.camera.setView({
+                destination,
+                orientation: { heading, pitch, roll }
+            });
+        }
+
+        // 关键修复：正确的 Cesium 到 Three.js 向量转换
+        function cesiumToThreeVector(cesiumVec) {
+            // Cesium ECEF: X=赤道0°, Y=赤道90°E, Z=北极
+            // Three.js: X=右, Y=上, Z=向外(朝向观察者)
+            return new THREE.Vector3(
+                cesiumVec.x,
+                cesiumVec.z,
+                -cesiumVec.y
+            );
+        }
+
+        // 关键修复：构造正确的 ENU 坐标基
+        function getLocalEnuBasis() {
+            const pos = viewer.camera.positionWC || viewer.camera.position;
+            if (!pos) return lastStableBasis;
+
+            const enuMatrix = Cesium.Transforms.eastNorthUpToFixedFrame(
+                pos,
+                Cesium.Ellipsoid.WGS84
+            );
+
+            const cesiumEast = new Cesium.Cartesian3();
+            const cesiumNorth = new Cesium.Cartesian3();
+            const cesiumUp = new Cesium.Cartesian3();
+
+            Cesium.Matrix4.getColumn(enuMatrix, 0, cesiumEast);
+            Cesium.Matrix4.getColumn(enuMatrix, 1, cesiumNorth);
+            Cesium.Matrix4.getColumn(enuMatrix, 2, cesiumUp);
+
+            const east = cesiumToThreeVector(cesiumEast).normalize();
+            const north = cesiumToThreeVector(cesiumNorth).normalize();
+            const up = cesiumToThreeVector(cesiumUp).normalize();
+
+            if (!isValidVector3(east) || !isValidVector3(north) || !isValidVector3(up)) {
+                return lastStableBasis;
+            }
+
+            const blend = lastStableBasis.valid ? 0.85 : 0.0;
+            lastStableBasis.east.lerpVectors(east, lastStableBasis.east, blend).normalize();
+            lastStableBasis.north.lerpVectors(north, lastStableBasis.north, blend).normalize();
+            lastStableBasis.up.lerpVectors(up, lastStableBasis.up, blend).normalize();
+            lastStableBasis.down.copy(lastStableBasis.up).multiplyScalar(-1);
+            lastStableBasis.valid = true;
+            return lastStableBasis;
+        }
+
+        function isValidVector3(v) {
+            return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z) && v.lengthSq() > 1e-10;
+        }
+
+        function onGuiPoseChanged() {
+            if (guiState.syncing) return;
+            applyGuiPoseToCesium();
         }
 
         function onWindowResize() {
             threeCamera.aspect = window.innerWidth / window.innerHeight;
             threeCamera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
-            composer.setSize(window.innerWidth, window.innerHeight);
         }
 
         function animate() {
@@ -300,10 +395,25 @@
             const delta = clock.getDelta();
             const elapsedTime = clock.getElapsedTime();
             
-            // 同步 Cesium 相机到 Three.js 相机
+            // 关键：同步相机
             syncCesiumToThreeCamera();
+            syncParamsFromCesiumCamera();
 
-            // Snow Particles Physics
+            // 更新粒子
+            updateParticles(elapsedTime);
+
+            // 渲染
+            renderer.render(scene, threeCamera);
+            
+            // 调试信息
+            if (params.showDebugInfo) {
+                updateDebugInfo();
+            } else {
+                document.getElementById('info').style.display = 'none';
+            }
+        }
+
+        function updateParticles(elapsedTime) {
             const positions = particles.geometry.attributes.position.array;
             const timeOffset = elapsedTime * params.timeScale;
             const turb = params.turbulence;
@@ -311,6 +421,10 @@
             const globalSpeed = params.windSpeed;
             const baseX = params.baseX;
             const baseY = params.baseY;
+            const basis = getLocalEnuBasis();
+            const east = basis.east;
+            const north = basis.north;
+            const down = basis.down;
 
             for (let i = 0; i < params.count; i++) {
                 const ix = i * 3;
@@ -321,7 +435,6 @@
                 let py = positions[iy];
                 let pz = positions[iz];
 
-                // Multi-octave 3D noise
                 let noiseX = 0, noiseY = 0, noiseZ = 0;
                 let amplitude = 1;
                 let frequency = 1;
@@ -334,15 +447,18 @@
                     frequency *= 2;
                 }
 
-                const vx = (baseX + noiseX * force) * globalSpeed;
-                const vy = (baseY + noiseY * force * 0.5) * globalSpeed;
-                const vz = (noiseZ * force) * globalSpeed;
+                const eastSpeed = (baseX + noiseX * force) * globalSpeed;
+                const northSpeed = (noiseZ * force) * globalSpeed;
+                const downSpeed = Math.max(0.05, -(baseY + noiseY * force * 0.5)) * globalSpeed;
+
+                const vx = east.x * eastSpeed + north.x * northSpeed + down.x * downSpeed;
+                const vy = east.y * eastSpeed + north.y * northSpeed + down.y * downSpeed;
+                const vz = east.z * eastSpeed + north.z * northSpeed + down.z * downSpeed;
 
                 positions[ix] += vx;
                 positions[iy] += vy;
                 positions[iz] += vz;
 
-                // Boundary check
                 const boundary = areaSize / 2;
                 
                 if (positions[iy] < -boundary) {
@@ -357,33 +473,84 @@
             }
 
             particles.geometry.attributes.position.needsUpdate = true;
-
-            // Direct render without post-processing
-            renderer.render(scene, threeCamera);
         }
 
-        // 同步 Cesium 相机到 Three.js 相机
+        // 关键修复:正确的相机同步方法
         function syncCesiumToThreeCamera() {
             const cesiumCamera = viewer.camera;
+            
+            // 获取 Cesium 相机的基向量
+            const cesiumRight = cesiumCamera.right;
+            const cesiumUp = cesiumCamera.up;
+            const cesiumDirection = cesiumCamera.direction;
 
-            // Cesium 使用 East-North-Up (X=东, Y=北, Z=上)
-            // Three 使用 X=右, Y=上, Z=朝屏幕外（相机看向 -Z）
-            // 因此需要做轴重映射：Three = (x, z, -y) from Cesium
-            const toThree = (v) => new THREE.Vector3(v.x, v.z, -v.y);
+            // 转换到 Three.js 坐标系
+            const right = cesiumToThreeVector(cesiumRight).normalize();
+            const up = cesiumToThreeVector(cesiumUp).normalize();
+            const forward = cesiumToThreeVector(cesiumDirection).normalize();
 
-            const dir = toThree(cesiumCamera.direction).normalize(); // 前方
-            const up = toThree(cesiumCamera.up).normalize();         // 上方
-            const right = toThree(cesiumCamera.right).normalize();   // 右方
+            // 验证向量有效性
+            if (!isValidVector3(right) || !isValidVector3(up) || !isValidVector3(forward)) {
+                return;
+            }
 
-            // 让 Three 相机面向 Cesium 的前方：Three 相机的 -Z 对齐 Cesium 的 direction
-            const zAxis = dir.clone().multiplyScalar(-1);
-
-            const basis = new THREE.Matrix4();
-            basis.makeBasis(right, up, zAxis);
-            threeCamera.setRotationFromMatrix(basis);
-
-            // 粒子层固定在原点，只同步朝向；位置保持 0 避免引入位移差
+            // 构建旋转矩阵
+            // Three.js 相机默认朝向 -Z 轴
+            const rotMatrix = new THREE.Matrix4();
+            rotMatrix.makeBasis(right, up, forward.multiplyScalar(-1));
+            
+            // 应用旋转
+            threeCamera.setRotationFromMatrix(rotMatrix);
+            
+            // Three.js 相机固定在原点（粒子系统相对于相机）
             threeCamera.position.set(0, 0, 0);
+            
+            // 同步 FOV（仅在启用时）
+            if (params.syncFov) {
+                const cesiumFov = Cesium.Math.toDegrees(cesiumCamera.frustum.fov);
+                if (Math.abs(threeCamera.fov - cesiumFov) > 0.1) {
+                    threeCamera.fov = cesiumFov;
+                    params.fov = cesiumFov;
+                    if (guiState.controllers.fov) {
+                        guiState.controllers.fov.setValue(cesiumFov);
+                    }
+                    threeCamera.updateProjectionMatrix();
+                }
+            }
+        }
+
+        function updateDebugInfo() {
+            const info = document.getElementById('info');
+            info.style.display = 'block';
+            
+            const cesiumCam = viewer.camera;
+            const h = Cesium.Math.toDegrees(cesiumCam.heading).toFixed(1);
+            const p = Cesium.Math.toDegrees(cesiumCam.pitch).toFixed(1);
+            const r = Cesium.Math.toDegrees(cesiumCam.roll).toFixed(1);
+            
+            const cesiumFov = Cesium.Math.toDegrees(cesiumCam.frustum.fov).toFixed(1);
+            const threeFov = threeCamera.fov.toFixed(1);
+            const fovSync = params.syncFov ? '✓' : '✗';
+            
+            const basis = getLocalEnuBasis();
+            
+            info.innerHTML = `
+                <strong>Cesium Camera HPR:</strong><br>
+                H: ${h}° | P: ${p}° | R: ${r}°<br>
+                <br>
+                <strong>FOV 同步状态:</strong><br>
+                Cesium FOV: ${cesiumFov}°<br>
+                Three.js FOV: ${threeFov}°<br>
+                自动同步: ${fovSync}<br>
+                <br>
+                <strong>Three.js Camera:</strong><br>
+                Rotation: (${threeCamera.rotation.x.toFixed(2)}, ${threeCamera.rotation.y.toFixed(2)}, ${threeCamera.rotation.z.toFixed(2)})<br>
+                <br>
+                <strong>ENU Basis (Three.js coords):</strong><br>
+                East: (${basis.east.x.toFixed(2)}, ${basis.east.y.toFixed(2)}, ${basis.east.z.toFixed(2)})<br>
+                North: (${basis.north.x.toFixed(2)}, ${basis.north.y.toFixed(2)}, ${basis.north.z.toFixed(2)})<br>
+                Up: (${basis.up.x.toFixed(2)}, ${basis.up.y.toFixed(2)}, ${basis.up.z.toFixed(2)})
+            `;
         }
     </script>
 </body>
