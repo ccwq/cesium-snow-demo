@@ -73,8 +73,10 @@
 
         window.viewer = viewer;
         viewer.imageryLayers.removeAll();
-        viewer.imageryLayers.addImageryProvider(new Cesium.OpenStreetMapImageryProvider({
-            url: 'https://a.tile.openstreetmap.org/'
+        viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({
+            url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+            subdomains: ['a', 'b', 'c', 'd'],
+            credit: '© OpenStreetMap contributors © CARTO'
         }));
 
         const position = Cesium.Cartesian3.fromDegrees(-74.0060, 40.7128, 5000);
