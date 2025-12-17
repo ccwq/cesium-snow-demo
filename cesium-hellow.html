@@ -129,6 +129,8 @@
             baseY: -1.5,
             
             enableMouseControl: false,
+            enableOrbit: false,  // 新增：是否启用环绕
+            orbitSpeed: 1.0,     // 新增：环绕速度
             heading: 0,
             pitch: -45,
             roll: 0,
@@ -252,6 +254,8 @@
 
             const camFolder = gui.addFolder('📷 相机控制');
             guiState.controllers.enableMouseControl = camFolder.add(params, 'enableMouseControl').name('启用鼠标控制');
+            guiState.controllers.enableOrbit = camFolder.add(params, 'enableOrbit').name('🔄 启用环绕');
+            guiState.controllers.orbitSpeed = camFolder.add(params, 'orbitSpeed', 0.1, 5.0).name('环绕速度').step(0.1);
             guiState.controllers.heading = camFolder.add(params, 'heading', -180, 180).name('航向角 Heading (°)').onChange(onGuiPoseChanged);
             guiState.controllers.pitch = camFolder.add(params, 'pitch', -89, 89).name('俯仰角 Pitch (°)').onChange(onGuiPoseChanged);
             guiState.controllers.roll = camFolder.add(params, 'roll', -180, 180).name('翻滚角 Roll (°)').onChange(onGuiPoseChanged);
@@ -396,6 +400,17 @@
         function render() {
             const delta = clock.getDelta();
             const elapsedTime = clock.getElapsedTime();
+            
+            // 关键：环绕逻辑
+            if (params.enableOrbit) {
+                // 根据速度和时间增量更新航向角
+                params.heading += params.orbitSpeed * delta * 30; // 30是缩放因子，使速度更直观
+                // 确保航向角在 -180 到 180 度之间
+                if (params.heading > 180) params.heading -= 360;
+                if (params.heading < -180) params.heading += 360;
+                // 应用更新后的航向角
+                onGuiPoseChanged();
+            }
             
             // 关键：同步相机
             syncCesiumToThreeCamera();
