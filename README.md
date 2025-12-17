@@ -65,9 +65,6 @@
 cesium-snow-demo/
 ├── cesium-hellow.html     # 主演示文件
 ├── snow.html              # 简化版雪花效果
-├── .history/              # IDE历史文件（无需关注）
-├── .trae/                 # 项目文档和计划
-│   └── documents/         # 项目相关文档
 └── README.md              # 项目说明文档
 ```
 
